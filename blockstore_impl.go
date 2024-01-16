@@ -348,19 +348,24 @@ func (bs *BlockStoreImpl) PutBlock(block *commonPb.Block, txRWSets []*commonPb.T
 
 	return err
 }
-
 func (bs *BlockStoreImpl) ReplaceBlock(block *commonPb.Block, txRWSets []*commonPb.TxRWSet) error {
 	bs.logger.Infof("start putBlock,height:[%d]", block.Header.BlockHeight)
 	defer func() {
 		bs.logger.Infof("end putBlock,height:[%d]", block.Header.BlockHeight)
 	}()
-	var err = error(nil)
+
+	var err error // Declare err variable for later use
+	//if block.Header.BlockHeight != 1{
+	//	block.Header.BlockHeight=1
+	//}
+	// Removed bs.verifyCommitBlock(block) call
+
 	switch bs.storeConfig.WriteBlockType {
 	case conf.CommonWriteBlockType:
-		//普通写模式
-		err = bs.CommonPutBlock(block, txRWSets)
+		// 普通写模式
+		err = bs.CommonReplaceBlock(block, txRWSets)
 	case conf.QuickWriteBlockType:
-		//快速写模式
+		// 快速写模式
 		err = bs.QuickPutBlock(block, txRWSets)
 	default:
 		err = errors.New("config error,write_block_type: " + strconv.Itoa(bs.storeConfig.WriteBlockType))
@@ -370,9 +375,9 @@ func (bs *BlockStoreImpl) ReplaceBlock(block *commonPb.Block, txRWSets []*common
 		bs.logger.Errorf(err.Error())
 		return commonErr.ErrStoreServiceNeedRestarted
 	}
-
 	return err
 }
+
 // WriteKvDbCacheSqlDb commit block to kvdb cache and sqldb
 // @Description:
 // 写block,state,history,result,bigfilter 5种kvdb cache或者对应的sqldb，
@@ -612,9 +617,91 @@ func (bs *BlockStoreImpl) CommonPutBlock(block *commonPb.Block, txRWSets []*comm
 
 	marshalDur := time.Since(startTime)
 	errsChan := make(chan error, 6)
-
 	// 1.write wal
 	blockIndex, err := bs.writeBlockToFile(block.Header.BlockHeight, blockBytes)
+	blockWithSerializedInfo.Index = blockIndex
+	writeFileDur := time.Since(startTime)
+	//放回对象池
+	bs.protoBufferPool.Put(buf)
+	if err != nil {
+		bs.logger.Errorf("chain[%s] failed to write log, block[%d], err:%s",
+			block.Header.ChainId, block.Header.BlockHeight, err)
+		return err
+	}
+
+	// 2.写 kvdb Cache 或者 写sql
+	//err = bs.WriteKvDbCacheSqlDb(blockWithSerializedInfo, errsChan)
+	err = bs.WriteKvDbCacheSqlDb(blockWithSerializedInfo, errsChan)
+	if err != nil {
+		bs.logger.Errorf("chain[%s] failed to write KvDbCacheSqldb, block[%d], err:%s",
+			block.Header.ChainId, block.Header.BlockHeight, err)
+		return err
+	}
+	writeCacheDur := time.Since(startTime)
+	//以上写WriteKvDbCacheSqlDb,有一个写入失败，返回第一个错误
+	if len(errsChan) > 0 {
+		return <-errsChan
+	}
+
+	// 3.写 kvdb
+	err = bs.WriteKvDb(blockWithSerializedInfo, errsChan)
+	if err != nil {
+		bs.logger.Errorf("chain[%s] failed to write WriteKvDb, block[%d], err:%s",
+			block.Header.ChainId, block.Header.BlockHeight, err)
+		return err
+	}
+
+	writeKvDBDur := time.Since(startTime)
+	//WriteKvDb,有一个写入失败，返回第一个错误
+	if len(errsChan) > 0 {
+		return <-errsChan
+	}
+	// 4.删除wal,每100个block删除一次
+	go func() {
+		err = bs.deleteBlockFromLog(block.Header.BlockHeight)
+		if err != nil {
+			bs.logger.Warnf("chain[%s]: failed to clean log, block[%d], err:%s",
+				block.Header.ChainId, block.Header.BlockHeight, err)
+		}
+	}()
+
+	bs.logger.Infof("chain[%s]: put block[%d] common (txs:%d, bytes: %d), time used: "+
+		"marshal: %v, writeFile: %v, writeCache: %v, writeKvDB: %v, total: %v", block.Header.ChainId,
+		block.Header.BlockHeight, len(block.Txs), len(blockBytes), marshalDur.Milliseconds(),
+		(writeFileDur - marshalDur).Milliseconds(), (writeCacheDur - writeFileDur).Milliseconds(),
+		(writeKvDBDur - writeCacheDur).Milliseconds(), time.Since(startTime).Milliseconds())
+
+	return nil
+}
+//CommonReplaceBlock xqh修改
+func (bs *BlockStoreImpl) CommonReplaceBlock(block *commonPb.Block, txRWSets []*commonPb.TxRWSet) error {
+	startTime := time.Now()
+	//序列化
+	blockWithRWSet := &storePb.BlockWithRWSet{
+		Block:    block,
+		TxRWSets: txRWSets,
+	}
+	//blockBytes, blockWithSerializedInfo, err := serialization.SerializeBlock(blockWithRWSet)
+	buf, ok := bs.protoBufferPool.Get().(*proto.Buffer)
+	if !ok {
+		bs.logger.Errorf("chain[%s]: put block[%d] (txs:%d) when proto buffer pool get",
+			block.Header.ChainId, block.Header.BlockHeight, len(block.Txs))
+		return errGetBufPool
+	}
+	buf.Reset()
+
+	blockBytes, blockWithSerializedInfo, err := serialization.SerializeBlock(blockWithRWSet)
+	if err != nil {
+		bs.logger.Errorf("chain[%s] failed to write log, block[%d], err:%s",
+			block.Header.ChainId, block.Header.BlockHeight, err)
+		return err
+	}
+
+	marshalDur := time.Since(startTime)
+	errsChan := make(chan error, 6)
+	bs.logger.Infof("xqh commonReplaceBlock: block.Header.BlockHeight [%d]",block.Header.BlockHeight)
+	// 1.write wal
+	blockIndex, err := bs.replaceBlockToFile(block.Header.BlockHeight, blockBytes)
 	blockWithSerializedInfo.Index = blockIndex
 	writeFileDur := time.Since(startTime)
 	//放回对象池
@@ -1990,9 +2077,34 @@ func (bs *BlockStoreImpl) writeBlockToFile(blockHeight uint64, bytes []byte) (*s
 	if bs.storeConfig.DisableBlockFileDb {
 		return nil, bs.walLog.Write(blockHeight+1, bytes)
 	}
-
-	// wal log, index increase from 1, while blockHeight increase form 0
+	//bs.logger.Infof("xqh: blockHeight+1 = %d",blockHeight+1)
+	// wal log, index increase from 1, while blockHeight increase from 0
 	fileName, offset, bytesLen, err := bs.blockFileDB.Write(blockHeight+1, bytes)
+	if err != nil {
+		return nil, err
+	}
+
+	return &storePb.StoreInfo{
+		FileName: fileName,
+		Offset:   offset,
+		ByteLen:  bytesLen,
+	}, nil
+}
+// replaceBlockToFrile xqh修改
+//  writeBlockToFile 将block写入到filedb中
+//  @Description:
+//  @receiver bs
+//  @param blockHeight
+//  @param bytes
+//  @return *storePb.StoreInfo
+//  @return error
+func (bs *BlockStoreImpl)  replaceBlockToFile(blockHeight uint64, bytes []byte) (*storePb.StoreInfo, error) {
+	if bs.storeConfig.DisableBlockFileDb {
+		return nil, bs.walLog.Write(blockHeight+1, bytes)
+	}
+	bs.logger.Infof("xqh: blockHeight+1 = %d",blockHeight+1)
+	// wal log, index increase from 1, while blockHeight increase from 0
+	fileName, offset, bytesLen, err := bs.blockFileDB.Replace(blockHeight+1, bytes)
 	if err != nil {
 		return nil, err
 	}

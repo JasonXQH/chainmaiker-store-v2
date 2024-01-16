@@ -493,6 +493,7 @@ func (l *BlockFile) Write(index uint64, data []byte) (fileName string, offset, b
 	} else if l.closed {
 		return "", 0, 0, ErrClosed
 	}
+	//l.logger.Infof("xqh Write: index = %d",index)
 	l.wbatch.Write(index, data)
 	bwi, err := l.writeBatch(&l.wbatch)
 	if err != nil {
@@ -500,7 +501,25 @@ func (l *BlockFile) Write(index uint64, data []byte) (fileName string, offset, b
 	}
 	return bwi.FileName, bwi.Offset, bwi.ByteLen, nil
 }
+//xqh修改：
+func (l *BlockFile) Replace(index uint64, data []byte) (fileName string, offset, blkLen uint64, err error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 
+	l.bclock = time.Now()
+	if l.corrupt {
+		return "", 0, 0, ErrCorrupt
+	} else if l.closed {
+		return "", 0, 0, ErrClosed
+	}
+	l.logger.Infof("xqh Write: index = %d",index)
+	l.wbatch.Write(index, data)
+	bwi, err := l.replaceBatch(&l.wbatch)
+	if err != nil {
+		return "", 0, 0, err
+	}
+	return bwi.FileName, bwi.Offset, bwi.ByteLen, nil
+}
 //  cycle
 //  @Description: Cycle the old segment for a new segment.
 //  @receiver l
@@ -598,6 +617,7 @@ func (l *BlockFile) WriteBatch(b *Batch) (*storePb.StoreInfo, error) {
 //  @return error
 func (l *BlockFile) writeBatch(b *Batch) (*storePb.StoreInfo, error) {
 	// check that indexes in batch are same
+	l.logger.Infof("xqh : l.lastIndex = %d",l.lastIndex)
 	if b.entry.index != l.lastIndex+uint64(1) {
 		l.logger.Errorf(fmt.Sprintf("out of order, b.entry.index: %d and l.lastIndex+uint64(1): %d",
 			b.entry.index, l.lastIndex+uint64(1)))
@@ -646,7 +666,58 @@ func (l *BlockFile) writeBatch(b *Batch) (*storePb.StoreInfo, error) {
 		ByteLen:  uint64(b.entry.size),
 	}, nil
 }
+//xqh 修改
+func (l *BlockFile) replaceBatch(b *Batch) (*storePb.StoreInfo, error) {
+	// check that indexes in batch are same
+	l.logger.Infof("xqh : l.lastIndex = %d",l.lastIndex)
+	if b.entry.index != l.lastIndex+uint64(1) {
+		l.logger.Errorf(fmt.Sprintf("out of order, b.entry.index: %d and l.lastIndex+uint64(1): %d",
+			b.entry.index, l.lastIndex+uint64(1)))
+		if l.lastIndex == 0 {
+			l.logger.Errorf("your block rfile db is damaged or not use blockfile before, " +
+				"please check your disable_block_file_db setting in chainmaker.yml")
+		}
+		return nil, ErrOutOfOrder
+	}
 
+	// load the tail segment
+	s := l.lastSegment
+	if len(s.ebuf) > l.opts.SegmentSize {
+		// tail segment has reached capacity. Close it and create a new one.
+		if err := l.cycle(); err != nil {
+			return nil, err
+		}
+		s = l.lastSegment
+	}
+
+	var epos tbf.Bpos
+	s.ebuf, epos = tbf.AppendBinaryEntry(s.ebuf, b.data)
+	s.epos = append(s.epos, epos)
+
+	startTime := time.Now()
+	l.sfile.Lock()
+	if _, err := l.sfile.Wfile.WriteAt(s.ebuf[epos.Pos:epos.End], int64(epos.Pos)); err != nil {
+		l.logger.Errorf("write rfile: %s in %d err: %v", s.path, s.index+uint64(len(s.epos)), err)
+		return nil, err
+	}
+	l.lastIndex = b.entry.index
+	l.sfile.Unlock()
+	l.logger.Debugf("writeBatch block[%d] rfile.WriteAt time: %v", l.lastIndex, utils.ElapsedMillisSeconds(startTime))
+
+	if !l.opts.NoSync {
+		if err := l.sfile.Wfile.Sync(); err != nil {
+			return nil, err
+		}
+	}
+	if epos.End-epos.Pos != b.entry.size+epos.PrefixLen {
+		return nil, ErrBlockWrite
+	}
+	return &storePb.StoreInfo{
+		FileName: l.lastSegment.name[:tbf.DBFileNameLen],
+		Offset:   uint64(epos.Pos + epos.PrefixLen),
+		ByteLen:  uint64(b.entry.size),
+	}, nil
+}
 // LastIndex returns the index of the last entry in the log. Returns zero when
 //  @Description:
 // log has no entries.

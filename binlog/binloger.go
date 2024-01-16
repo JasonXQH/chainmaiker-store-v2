@@ -47,7 +47,8 @@ type BinLogger interface {
 	//  @return blkLen
 	//  @return err
 	Write(index uint64, data []byte) (fileName string, offset, blkLen uint64, err error)
-
+	//xqh修改
+	Replace(index uint64, data []byte) (fileName string, offset, blkLen uint64, err error)
 	// ReadFileSection read data, according to file index
 	// @Description:
 	// @param fiIndex
