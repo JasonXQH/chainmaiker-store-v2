@@ -651,7 +651,7 @@ func (l *BlockFile) writeBatch(b *Batch) (*storePb.StoreInfo, error) {
 	l.lastIndex = b.entry.index
 	l.sfile.Unlock()
 	l.logger.Debugf("writeBatch block[%d] rfile.WriteAt time: %v", l.lastIndex, utils.ElapsedMillisSeconds(startTime))
-
+	l.logger.Infof("xqh :writeBatch blockIndex FileName: %s, Offset:   %d ,ByteLen: %d", l.lastSegment.name[:tbf.DBFileNameLen],uint64(epos.Pos + epos.PrefixLen),uint64(b.entry.size))
 	if !l.opts.NoSync {
 		if err := l.sfile.Wfile.Sync(); err != nil {
 			return nil, err
@@ -670,17 +670,18 @@ func (l *BlockFile) writeBatch(b *Batch) (*storePb.StoreInfo, error) {
 func (l *BlockFile) replaceBatch(b *Batch) (*storePb.StoreInfo, error) {
 	// check that indexes in batch are same
 	l.logger.Infof("xqh : l.lastIndex = %d",l.lastIndex)
-	if b.entry.index != l.lastIndex+uint64(1) {
-		l.logger.Errorf(fmt.Sprintf("out of order, b.entry.index: %d and l.lastIndex+uint64(1): %d",
-			b.entry.index, l.lastIndex+uint64(1)))
-		if l.lastIndex == 0 {
-			l.logger.Errorf("your block rfile db is damaged or not use blockfile before, " +
-				"please check your disable_block_file_db setting in chainmaker.yml")
-		}
-		return nil, ErrOutOfOrder
-	}
+	//if b.entry.index != l.lastIndex+uint64(1) {
+	//	l.logger.Errorf(fmt.Sprintf("out of order, b.entry.index: %d and l.lastIndex+uint64(1): %d",
+	//		b.entry.index, l.lastIndex+uint64(1)))
+	//	if l.lastIndex == 0 {
+	//		l.logger.Errorf("your block rfile db is damaged or not use blockfile before, " +
+	//			"please check your disable_block_file_db setting in chainmaker.yml")
+	//	}
+	//	return nil, ErrOutOfOrder
+	//}
 
 	// load the tail segment
+
 	s := l.lastSegment
 	if len(s.ebuf) > l.opts.SegmentSize {
 		// tail segment has reached capacity. Close it and create a new one.
@@ -689,9 +690,11 @@ func (l *BlockFile) replaceBatch(b *Batch) (*storePb.StoreInfo, error) {
 		}
 		s = l.lastSegment
 	}
-
+	l.logger.Infof("xqh :len(s.ebuf) = %d",len(s.ebuf))
 	var epos tbf.Bpos
 	s.ebuf, epos = tbf.AppendBinaryEntry(s.ebuf, b.data)
+	//此时 ebuf已经变成
+	//把新的epos加入到s.epos结构中
 	s.epos = append(s.epos, epos)
 
 	startTime := time.Now()
@@ -712,6 +715,7 @@ func (l *BlockFile) replaceBatch(b *Batch) (*storePb.StoreInfo, error) {
 	if epos.End-epos.Pos != b.entry.size+epos.PrefixLen {
 		return nil, ErrBlockWrite
 	}
+	l.logger.Infof("xqh :replaceBatch blockIndex FileName: %s, Offset:   %d ,ByteLen: %d", l.lastSegment.name[:tbf.DBFileNameLen],uint64(epos.Pos + epos.PrefixLen),uint64(b.entry.size))
 	return &storePb.StoreInfo{
 		FileName: l.lastSegment.name[:tbf.DBFileNameLen],
 		Offset:   uint64(epos.Pos + epos.PrefixLen),
@@ -798,6 +802,8 @@ func (l *BlockFile) ReadLastSegSection(index uint64, forceFetch bool) (data []by
 	fileName = l.lastSegment.name[:tbf.DBFileNameLen]
 	offset = uint64(epos.Pos + epos.PrefixLen)
 	byteLen = uint64(len(data))
+	l.logger.Infof("xqh 进入ReadLastSetSection index = %d ,l.lastSegment.index = %d， offset = %d ,byteLen = %d",index,s.index,offset,byteLen)
+
 	return data, fileName, offset, byteLen, nil
 }
 
@@ -1012,6 +1018,7 @@ func (l *BlockFile) filterFDB(path string, isTmpPath bool) ([]*tbf.SegName, erro
 // @return []byte
 // @return error
 func (l *BlockFile) ReadFileSection(fiIndex *storePb.StoreInfo, timeOut time.Duration) ([]byte, error) {
+	l.logger.Infof("xqh 进入ReadFileSection函数")
 	var (
 		err  error
 		data []byte

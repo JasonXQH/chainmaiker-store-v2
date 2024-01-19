@@ -25,15 +25,22 @@ import (
 //  @param data
 //  @return out
 //  @return epos
+//往ebuf中写入data
 func AppendBinaryEntry(dst []byte, data []byte) (out []byte, epos Bpos) {
 	// checksum + data_size + data
+	//计算dst的长度（pos := len(dst)）这将作为新数据的起始位置。
 	pos := len(dst)
 	// Customize part start
+	// 计算数据的校验和，并追加到dst。这一步确保数据的完整性。
 	dst = AppendChecksum(dst, NewCRC(data).Value())
 	// Customize part end
+	//将data的长度以变长编码方式追加到dst。
 	dst = AppendUvarint(dst, uint64(len(data)))
+	//计算前缀长度（prefixLen），即从data长度信息开始到实际数据开始之前的字节长度。
 	prefixLen := len(dst) - pos
+	//将data追加到dst。
 	dst = append(dst, data...)
+	//返回更新后的dst和一个Bpos结构，包含数据的起始位置、结束位置和前缀长度。
 	return dst, Bpos{pos, len(dst), prefixLen}
 }
 

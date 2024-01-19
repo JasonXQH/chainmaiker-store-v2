@@ -488,7 +488,107 @@ func (bs *BlockStoreImpl) WriteKvDbCacheSqlDb(blockWithSerializedInfo *serializa
 	//	block.Header.ChainId, block.Header.BlockHeight, len(block.Txs), utils.CurrentTimeMillisSeconds())
 	return nil
 }
+//xqh change
+func (bs *BlockStoreImpl) ReplaceKvDbCacheSqlDb(blockWithSerializedInfo *serialization.BlockWithSerializedInfo,
+	errsChan chan error) error {
 
+	wg := sync.WaitGroup{}
+	wg.Add(8)
+
+	// 1.blockDB
+	go func(bs *BlockStoreImpl, errsChan chan error) {
+		defer wg.Done()
+
+		if bs.storeConfig.BlockDbConfig.IsKVDB() {
+			// update blockDB Cache
+			bs.replaceBlock2DB(blockWithSerializedInfo, errsChan, bs.blockDB.CommitBlock, true)
+		}
+		if bs.storeConfig.BlockDbConfig.IsSqlDB() {
+			// update blockDB SqlDB
+			bs.putBlock2DB(blockWithSerializedInfo, errsChan, bs.blockDB.CommitBlock, false)
+		}
+	}(bs, errsChan)
+
+	// 2.stateDB
+	go func(bs *BlockStoreImpl, errsChan chan error) {
+		defer wg.Done()
+		if bs.storeConfig.StateDbConfig.IsKVDB() {
+			// update stateDB Cache
+			bs.replaceBlock2DB(blockWithSerializedInfo, errsChan, bs.stateDB.CommitBlock, true)
+		}
+		if bs.storeConfig.StateDbConfig.IsSqlDB() {
+			bs.putBlock2DB(blockWithSerializedInfo, errsChan, bs.stateDB.CommitBlock, false)
+		}
+	}(bs, errsChan)
+
+	// 3.historyDB
+	go func(bs *BlockStoreImpl, errsChan chan error) {
+		defer wg.Done()
+		if !bs.storeConfig.DisableHistoryDB {
+			if bs.storeConfig.HistoryDbConfig.IsKVDB() {
+				// update stateDB Cache
+				bs.replaceBlock2DB(blockWithSerializedInfo, errsChan, bs.historyDB.CommitBlock, true)
+			}
+			if bs.storeConfig.HistoryDbConfig.IsSqlDB() {
+				bs.putBlock2DB(blockWithSerializedInfo, errsChan, bs.historyDB.CommitBlock, false)
+			}
+		}
+	}(bs, errsChan)
+
+	// 4.resultDB
+	go func(bs *BlockStoreImpl, errsChan chan error) {
+		defer wg.Done()
+		if !bs.storeConfig.DisableResultDB {
+			if bs.storeConfig.ResultDbConfig.IsKVDB() {
+				// update stateDB Cache
+				bs.replaceBlock2DB(blockWithSerializedInfo, errsChan, bs.resultDB.CommitBlock, true)
+			}
+			if bs.storeConfig.ResultDbConfig.IsSqlDB() {
+				bs.putBlock2DB(blockWithSerializedInfo, errsChan, bs.resultDB.CommitBlock, false)
+			}
+		}
+	}(bs, errsChan)
+
+	// 5.contractEventDB ,only DB ,contractEventDB has't Cache
+	go func(bs *BlockStoreImpl, errsChan chan error) {
+		defer wg.Done()
+		if !bs.storeConfig.DisableContractEventDB {
+			bs.replaceBlock2DB(blockWithSerializedInfo, errsChan, bs.contractEventDB.CommitBlock, false)
+		}
+	}(bs, errsChan)
+
+	// 6.txExistDB ,only DB ,txExistDB has't Cache
+	go func(bs *BlockStoreImpl, errsChan chan error) {
+		defer wg.Done()
+		//if !bs.storeConfig.DisableTxExistDB {
+		bs.replaceBlock2DB(blockWithSerializedInfo, errsChan, bs.txExistDB.CommitBlock, false)
+		//}
+	}(bs, errsChan)
+
+	// 7.bigFilterDB
+	go func(bs *BlockStoreImpl, errsChan chan error) {
+		defer wg.Done()
+		if bs.storeConfig.EnableBigFilter {
+			bs.replaceBlock2DB(blockWithSerializedInfo, errsChan, bs.bigFilterDB.CommitBlock, true)
+		}
+	}(bs, errsChan)
+
+	// 8.rollingWindowCache
+	go func(bs *BlockStoreImpl, errsChan chan error) {
+		defer wg.Done()
+		if bs.storeConfig.EnableRWC {
+			bs.replaceBlock2DB(blockWithSerializedInfo, errsChan, bs.rollingWindowCache.CommitBlock, true)
+		}
+
+	}(bs, errsChan)
+
+	wg.Wait()
+
+	//block := blockWithSerializedInfo.Block
+	//bs.logger.Debugf("chain[%s]: start put block[%d] (txs:%d) start writeBatchChan currtime[%d]",
+	//	block.Header.ChainId, block.Header.BlockHeight, len(block.Txs), utils.CurrentTimeMillisSeconds())
+	return nil
+}
 // WriteKvDb commit block to kvdb
 // @Description:
 // 写 block,state,history,result,bigfilter 5种kvdb,不包含contractevent db, 合约db只有 sql型，没有kv型.
@@ -580,7 +680,90 @@ func (bs *BlockStoreImpl) WriteKvDb(blockWithSerializedInfo *serialization.Block
 
 	return nil
 }
+func (bs *BlockStoreImpl) ReplaceKvDb(blockWithSerializedInfo *serialization.BlockWithSerializedInfo,
+	errsChan chan error) error {
 
+	wg := sync.WaitGroup{}
+	wg.Add(5)
+	start := time.Now()
+	var endBlock, endState, endHistory, endResult time.Time //用于统计耗时
+	// 1.blockDB
+	go func(bs *BlockStoreImpl, errsChan chan error) {
+		defer func() {
+			endBlock = time.Now()
+			wg.Done()
+		}()
+		if bs.storeConfig.BlockDbConfig.IsKVDB() {
+			// update blockDB
+			bs.putBlock2DB(blockWithSerializedInfo, errsChan, bs.blockDB.CommitBlock, false)
+		}
+	}(bs, errsChan)
+
+	// 2.stateDB
+	go func(bs *BlockStoreImpl, errsChan chan error) {
+		defer func() {
+			endState = time.Now()
+			wg.Done()
+		}()
+		if bs.storeConfig.StateDbConfig.IsKVDB() {
+			// update stateDB
+			bs.putBlock2DB(blockWithSerializedInfo, errsChan, bs.stateDB.CommitBlock, false)
+		}
+	}(bs, errsChan)
+
+	// 3.historyDB
+	go func(bs *BlockStoreImpl, errsChan chan error) {
+		defer func() {
+			endHistory = time.Now()
+			wg.Done()
+		}()
+		if !bs.storeConfig.DisableHistoryDB {
+			if bs.storeConfig.HistoryDbConfig.IsKVDB() {
+				// update stateDB
+				bs.putBlock2DB(blockWithSerializedInfo, errsChan, bs.historyDB.CommitBlock, false)
+			}
+		}
+	}(bs, errsChan)
+
+	// 4.resultDB
+	go func(bs *BlockStoreImpl, errsChan chan error) {
+		defer func() {
+			endResult = time.Now()
+			wg.Done()
+		}()
+		if !bs.storeConfig.DisableResultDB {
+			if bs.storeConfig.ResultDbConfig.IsKVDB() {
+				// update stateDB
+				bs.putBlock2DB(blockWithSerializedInfo, errsChan, bs.resultDB.CommitBlock, false)
+			}
+		}
+	}(bs, errsChan)
+
+	// 5.bigFilterDB
+	go func(bs *BlockStoreImpl, errsChan chan error) {
+		defer func() {
+			endResult = time.Now()
+			wg.Done()
+		}()
+		if bs.storeConfig.EnableBigFilter {
+			bs.putBlock2DB(blockWithSerializedInfo, errsChan, bs.bigFilterDB.CommitBlock, false)
+
+		}
+	}(bs, errsChan)
+
+	wg.Wait()
+	bs.logger.InfoDynamic(func() string {
+		block := blockWithSerializedInfo.Block
+		return fmt.Sprintf(
+			"chain[%s]: write block[%d] (txs:%d) kvdb spend: blockdb:%d,statedb:%d,historydb:%d,resultdb:%d,total:%d",
+			block.Header.ChainId, block.Header.BlockHeight, len(block.Txs),
+			endBlock.Sub(start).Milliseconds(), endState.Sub(start).Milliseconds(),
+			endHistory.Sub(start).Milliseconds(), endResult.Sub(start).Milliseconds(),
+			time.Since(start).Milliseconds())
+	})
+
+	return nil
+}
 // CommonPutBlock add next time
 // @Description:
 // 普通写模式，占用资源少，写入慢
@@ -677,6 +860,9 @@ func (bs *BlockStoreImpl) CommonPutBlock(block *commonPb.Block, txRWSets []*comm
 func (bs *BlockStoreImpl) CommonReplaceBlock(block *commonPb.Block, txRWSets []*commonPb.TxRWSet) error {
 	startTime := time.Now()
 	//序列化
+	// 替换掉初始区块
+	block.Header.BlockHeight=1
+	bs.logger.Infof("xqh change Block height to 1")
 	blockWithRWSet := &storePb.BlockWithRWSet{
 		Block:    block,
 		TxRWSets: txRWSets,
@@ -702,7 +888,9 @@ func (bs *BlockStoreImpl) CommonReplaceBlock(block *commonPb.Block, txRWSets []*
 	bs.logger.Infof("xqh commonReplaceBlock: block.Header.BlockHeight [%d]",block.Header.BlockHeight)
 	// 1.write wal
 	blockIndex, err := bs.replaceBlockToFile(block.Header.BlockHeight, blockBytes)
-	blockWithSerializedInfo.Index = blockIndex
+	//blockIndex :=
+	blockWithSerializedInfo.Index = blockIndex//正常写入wal
+
 	writeFileDur := time.Since(startTime)
 	//放回对象池
 	bs.protoBufferPool.Put(buf)
@@ -714,20 +902,21 @@ func (bs *BlockStoreImpl) CommonReplaceBlock(block *commonPb.Block, txRWSets []*
 
 	// 2.写 kvdb Cache 或者 写sql
 	//err = bs.WriteKvDbCacheSqlDb(blockWithSerializedInfo, errsChan)
-	err = bs.WriteKvDbCacheSqlDb(blockWithSerializedInfo, errsChan)
+	//此时写入的时候需要把新INfo，覆盖掉原来的Info，也就是
+	err = bs.ReplaceKvDbCacheSqlDb(blockWithSerializedInfo, errsChan)
 	if err != nil {
 		bs.logger.Errorf("chain[%s] failed to write KvDbCacheSqldb, block[%d], err:%s",
 			block.Header.ChainId, block.Header.BlockHeight, err)
 		return err
 	}
 	writeCacheDur := time.Since(startTime)
-	//以上写WriteKvDbCacheSqlDb,有一个写入失败，返回第一个错误
+	//以上写ReplaceKvDbCacheSqlDb,有一个写入失败，返回第一个错误
 	if len(errsChan) > 0 {
 		return <-errsChan
 	}
 
 	// 3.写 kvdb
-	err = bs.WriteKvDb(blockWithSerializedInfo, errsChan)
+	err = bs.ReplaceKvDb(blockWithSerializedInfo, errsChan)
 	if err != nil {
 		bs.logger.Errorf("chain[%s] failed to write WriteKvDb, block[%d], err:%s",
 			block.Header.ChainId, block.Header.BlockHeight, err)
@@ -959,6 +1148,18 @@ type commitBlock func(blockInfo *serialization.BlockWithSerializedInfo, isCache 
 // @param isCache
 func (bs *BlockStoreImpl) putBlock2DB(blockWithSerializedInfo *serialization.BlockWithSerializedInfo,
 	errsChan chan error, commit commitBlock, isCache bool) {
+	bs.logger.Infof("xqh putBlock2DB")
+	err := commit(blockWithSerializedInfo, isCache)
+	block := blockWithSerializedInfo.Block
+	if err != nil {
+		bs.logger.Errorf("chain[%s] failed to write DB, block[%d]",
+			block.Header.ChainId, block.Header.BlockHeight)
+		errsChan <- err
+	}
+}
+func (bs *BlockStoreImpl) replaceBlock2DB(blockWithSerializedInfo *serialization.BlockWithSerializedInfo,
+	errsChan chan error, commit commitBlock, isCache bool) {
+	bs.logger.Infof("xqh replaceBlock2DB")
 	err := commit(blockWithSerializedInfo, isCache)
 	block := blockWithSerializedInfo.Block
 	if err != nil {
@@ -1043,6 +1244,7 @@ func (bs *BlockStoreImpl) GetBlockHeaderByHeight(height uint64) (*commonPb.Block
 // @return *commonPb.Block
 // @return error
 func (bs *BlockStoreImpl) GetBlock(height uint64) (*commonPb.Block, error) {
+
 	result, err := bs.blockDB.GetBlock(height)
 	if err != nil {
 		bs.logger.Debugf("get block: %d failed: %v", height, err)
@@ -1091,8 +1293,10 @@ func (bs *BlockStoreImpl) GetLastHeight() (uint64, error) {
 // @return *commonPb.Block
 // @return error
 func (bs *BlockStoreImpl) GetLastBlock() (*commonPb.Block, error) {
+	bs.logger.Infof("xqh 进入 GetLastBlock")
 	var lastBlock *commonPb.Block
 	usePoint, err := bs.GetLastHeight()
+	bs.logger.Infof("xqh LastHeight = %d",usePoint)
 	if err != nil {
 		return nil, err
 	}
@@ -2114,6 +2318,11 @@ func (bs *BlockStoreImpl)  replaceBlockToFile(blockHeight uint64, bytes []byte) 
 		Offset:   offset,
 		ByteLen:  bytesLen,
 	}, nil
+	//return &storePb.StoreInfo{
+	//	FileName: "00000000000000000001",
+	//	Offset:   66415,
+	//	ByteLen:  36179,
+	//}, nil
 }
 
 //  getLastFileSavepoint 获得last save point

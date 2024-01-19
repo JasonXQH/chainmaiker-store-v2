@@ -488,6 +488,8 @@ func (b *BlockFileDB) GetBlockHeaderByHeight(height uint64) (*commonPb.BlockHead
 func (b *BlockFileDB) GetBlock(height uint64) (*commonPb.Block, error) {
 	// if block rfile db is enabled and db is kvdb, we will get data from block rfile db
 	index, err := b.GetBlockIndex(height)
+	b.logger.Infof("xqh 进入GetBlock, height = %d",height)
+
 	if err != nil {
 		if err == tbf.ErrArchivedBlock {
 			heightBytes := blockhelper.ConstructBlockNumKey(b.dbHandle.GetDbType(), height)
@@ -500,20 +502,33 @@ func (b *BlockFileDB) GetBlock(height uint64) (*commonPb.Block, error) {
 		}
 		return nil, err
 	}
-
+	//从这里读取的还是老的数据
 	data, _, _, _, _ := b.fileStore.ReadLastSegSection(height+1, false)
+	//data, err := b.fileStore.ReadFileSection(index, 0)
 	if len(data) == 0 {
 		if index == nil {
 			b.logger.Infof("get block index by height[%d] from block db is nil", height)
 			return nil, nil
 		}
+		//从这里的话就是新数据？
 		data, err = b.fileStore.ReadFileSection(index, 0)
 		if err != nil {
 			return nil, err
 		}
 	}
-
 	brw, err := serialization.DeserializeBlock(data)
+
+	var data2 []byte
+	if index!=nil {
+		b.logger.Infof("xqh GetBlock Index offset = %d,bytelen = %d",index.Offset,index.ByteLen)
+		data2,err = b.fileStore.ReadFileSection(index,0)
+	}
+	if data2!=nil {
+		brw,_ = serialization.DeserializeBlock(data2)
+		b.logger.Infof("xqh ReadFileSection读取到的data2 height = %d,hash = %x ",height,brw.Block.Hash())
+	}
+
+
 	if err != nil {
 		b.logger.Warnf("get block[%d] from file deserialize block failed: %v", height, err)
 		return nil, err
@@ -521,7 +536,7 @@ func (b *BlockFileDB) GetBlock(height uint64) (*commonPb.Block, error) {
 	if brw.Block == nil {
 		b.logger.Infof("get block by height[%d] deserializeBlock is nil", height)
 	}
-
+	b.logger.Infof("xqh GetBlock Height = %d ,得到blockHash = %x ",height,brw.Block.Hash())
 	return brw.Block, nil
 }
 
@@ -822,13 +837,16 @@ func (b *BlockFileDB) GetTxConfirmedTime(txId string) (int64, error) {
 //  @return *storePb.StoreInfo
 //  @return error
 func (b *BlockFileDB) GetBlockIndex(height uint64) (*storePb.StoreInfo, error) {
-	b.logger.Debugf("get block[%d] index", height)
 	indexKey := blockhelper.ConstructBlockIndexKey(b.dbHandle.GetDbType(), height)
 	vByte, err := blockhelper.GetFromCacheFirst(indexKey, b.dbHandle, b.cache, b.logger)
 	if err != nil {
 		return nil, err
 	}
 	vIndex, err1 := su.DecodeValueToIndex(vByte)
+	if vIndex!=nil {
+		b.logger.Infof("get block[%d] index,index.Offset : %d ,index.ByteLen : %d ", height,vIndex.Offset,vIndex.ByteLen)
+	}
+
 	if err1 == nil {
 		b.logger.Debugf("get block[%d] index: %s", height, vIndex.String())
 	}

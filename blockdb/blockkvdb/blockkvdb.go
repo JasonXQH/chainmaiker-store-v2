@@ -134,7 +134,7 @@ func (b *BlockKvDB) CommitCache(blockInfo *serialization.BlockWithSerializedInfo
 	// 6. 增加cache,注意这个batch放到cache中了，正在使用，不能放到batchPool中
 	b.cache.AddBlock(block.Header.BlockHeight, batch)
 
-	b.logger.Debugf("chain[%s]: commit cache block[%d] blockdb, batch[%d], time used: %d",
+	b.logger.Infof("xqh chain[%s]: commit cache block[%d] blockdb, batch[%d], time used: %d",
 		block.Header.ChainId, block.Header.BlockHeight, batch.Len(),
 		time.Since(start).Milliseconds())
 	return nil
