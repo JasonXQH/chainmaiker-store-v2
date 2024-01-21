@@ -133,6 +133,19 @@ func (b *BlockFileDB) CommitBlock(blockInfo *serialization.BlockWithSerializedIn
 	//如果不是更新cache，则 直接更新 kvdb，然后返回
 	return b.CommitDB(blockInfo)
 }
+func (b *BlockFileDB) ReplaceBlock(blockInfo *serialization.BlockWithSerializedInfo, isCache bool) error {
+	//原则上，写db失败，重试一定次数后，仍然失败，panic
+
+	//如果是更新cache，则 直接更新 然后返回，不写 dbHandle
+	if isCache {
+		b.logger.Infof("xqh BlockFileDB 调用ReplaceCache")
+		return b.ReplaceCache(blockInfo)
+	}
+	//如果不是更新cache，则 直接更新 kvdb，然后返回
+	b.logger.Infof("xqh BlockFileDB 调用ReplaceDB")
+
+	return b.ReplaceDB(blockInfo)
+}
 
 // CommitCache 提交数据到cache
 //  @Description:
@@ -218,7 +231,84 @@ func (b *BlockFileDB) CommitCache(blockInfo *serialization.BlockWithSerializedIn
 		time.Since(start).Milliseconds())
 	return nil
 }
+//这里，需要替换区块，但是不要改变最高块的高度
+func (b *BlockFileDB) ReplaceCache(blockInfo *serialization.BlockWithSerializedInfo) error {
+	//如果是更新cache，则 直接更新 然后返回，不写 dbHandle
+	//从对象池中取一个对象,并重置
+	blockttest,err := b.GetLastBlock()
+	b.logger.Infof("xqh ReplaceCache in blockfiledb lastBlock Height 1: %d",blockttest.Header.BlockHeight)
+	start := time.Now()
+	batch, ok := b.batchPools[0].Get().(*types.UpdateBatch)
+	if !ok {
+		b.logger.Errorf("chain[%s]: blockInfo[%d] get updatebatch error",
+			blockInfo.Block.Header.ChainId, blockInfo.Block.Header.BlockHeight)
+		return errGetBatchPool
+	}
+	batch.ReSet()
+	dbType := b.dbHandle.GetDbType()
+	//batch := types.NewUpdateBatch()
+	// 1. last blockInfo height
+	block := blockInfo.Block
+	//xqh 把这一行注释掉了，也就是不把LastBlockNumKeyStr 和 该block.Height做映射，不改变最高区块
+	//batch.Put([]byte(blockhelper.LastBlockNumKeyStr), blockhelper.EncodeBlockNum(block.Header.BlockHeight))
+	// 2. height-> blockInfo
+	if blockInfo.Index == nil || blockInfo.MetaIndex == nil {
+		return fmt.Errorf("blockInfo.Index and blockInfo.MetaIndex must not nil while block rfile db enabled")
+	}
+	blockIndexKey := blockhelper.ConstructBlockIndexKey(dbType, block.Header.BlockHeight)
+	blockIndexInfo, err := proto.Marshal(blockInfo.Index)
+	if err != nil {
+		return err
+	}
+	batch.Put(blockIndexKey, blockIndexInfo)
+	b.logger.Debugf("put block[%d] rfile index:%v", block.Header.BlockHeight, blockInfo.Index)
+	//save block meta index to db
+	metaIndexKey := blockhelper.ConstructBlockMetaIndexKey(dbType, block.Header.BlockHeight)
+	metaIndexInfo := su.ConstructDBIndexInfo(blockInfo.Index, blockInfo.MetaIndex.Offset,
+		blockInfo.MetaIndex.ByteLen)
+	batch.Put(metaIndexKey, metaIndexInfo)
+	// 4. hash-> height
+	hashKey := blockhelper.ConstructBlockHashKey(b.dbHandle.GetDbType(), block.Header.BlockHash)
+	batch.Put(hashKey, blockhelper.EncodeBlockNum(block.Header.BlockHeight))
+	// 4. txid -> tx,  txid -> blockHeight
+	// 5. Concurrency batch Put
+	//并发更新cache,ConcurrencyMap,提升并发更新能力
+	//groups := len(blockInfo.SerializedContractEvents)
+	wg := &sync.WaitGroup{}
+	wg.Add(len(blockInfo.SerializedTxs))
 
+	for index, txBytes := range blockInfo.SerializedTxs {
+		go func(index int, txBytes []byte, batch protocol.StoreBatcher, wg *sync.WaitGroup) {
+			defer wg.Done()
+			tx := blockInfo.Block.Txs[index]
+
+			// if block rfile db disable, save tx data to db
+			txFileIndex := blockInfo.TxsIndex[index]
+
+			// 把tx的地址写入数据库
+			blockTxIdKey := blockhelper.ConstructBlockTxIDKey(tx.Payload.TxId)
+			txBlockInf := blockhelper.ConstructFBTxIDBlockInfo(block.Header.BlockHeight, block.Header.BlockHash, uint32(index),
+				block.Header.BlockTimestamp, blockInfo.Index, txFileIndex)
+
+			batch.Put(blockTxIdKey, txBlockInf)
+			//b.logger.Debugf("put tx[%s] rfile index:%v", tx.Payload.TxId, txFileIndex)
+		}(index, txBytes, batch, wg)
+	}
+
+	wg.Wait()
+	// last configBlock height
+	if utils.IsConfBlock(block) || block.Header.BlockHeight == 0 {
+		batch.Put([]byte(blockhelper.LastConfigBlockNumKey), blockhelper.EncodeBlockNum(block.Header.BlockHeight))
+		b.logger.Infof("chain[%s]: commit config blockInfo[%d]", block.Header.ChainId, block.Header.BlockHeight)
+	}
+	// 6. 增加cache,注意这个batch放到cache中了，正在使用，不能放到batchPool中
+	b.cache.AddBlock(block.Header.BlockHeight, batch)
+
+	b.logger.Debugf("chain[%s]: commit cache block[%d] blockfiledb, batch[%d], time used: %d",
+		block.Header.ChainId, block.Header.BlockHeight, batch.Len(),
+		time.Since(start).Milliseconds())
+	return nil
+}
 // CommitDB 提交数据到kvdb
 //  @Description:
 //  @receiver b
@@ -259,7 +349,41 @@ func (b *BlockFileDB) CommitDB(blockInfo *serialization.BlockWithSerializedInfo)
 		batchDur.Milliseconds(), (writeDur - batchDur).Milliseconds(), time.Since(start).Milliseconds())
 	return nil
 }
+func (b *BlockFileDB) ReplaceDB(blockInfo *serialization.BlockWithSerializedInfo) error {
+	//1. 从缓存中取 batch
+	start := time.Now()
+	block := blockInfo.Block
+	cacheBatch, err := b.cache.GetBatch(block.Header.BlockHeight)
+	if err != nil {
+		b.logger.Errorf("chain[%s]: commit blockInfo[%d] delete cacheBatch error",
+			block.Header.ChainId, block.Header.BlockHeight)
+		panic(err)
+	}
 
+	batchDur := time.Since(start)
+	//2. write blockDb
+	writeBatch := types.NewUpdateBatch()
+	for k, v := range cacheBatch.KVs() {
+		writeBatch.Put([]byte(k), v)
+	}
+	err = b.writeBatch(block.Header.BlockHeight, writeBatch)
+	if err != nil {
+		return err
+	}
+
+	//3. Delete block from Cache, put batch to batchPools
+	//把cacheBatch 从Cache 中删除
+	b.cache.DelBlock(block.Header.BlockHeight)
+
+	//再把cacheBatch放回到batchPool 中 (注意这两步前后不能反了)
+	b.batchPools[0].Put(cacheBatch)
+	writeDur := time.Since(start)
+
+	b.logger.Debugf("chain[%s]: commit block[%d] kv blockfiledb, time used (batch[%d]:%d, "+
+		"write:%d, total:%d)", block.Header.ChainId, block.Header.BlockHeight, cacheBatch.Len(),
+		batchDur.Milliseconds(), (writeDur - batchDur).Milliseconds(), time.Since(start).Milliseconds())
+	return nil
+}
 // GetArchivedPivot return archived pivot
 //  @Description:
 //  @receiver b
@@ -518,15 +642,15 @@ func (b *BlockFileDB) GetBlock(height uint64) (*commonPb.Block, error) {
 	}
 	brw, err := serialization.DeserializeBlock(data)
 
-	var data2 []byte
-	if index!=nil {
-		b.logger.Infof("xqh GetBlock Index offset = %d,bytelen = %d",index.Offset,index.ByteLen)
-		data2,err = b.fileStore.ReadFileSection(index,0)
-	}
-	if data2!=nil {
-		brw,_ = serialization.DeserializeBlock(data2)
-		b.logger.Infof("xqh ReadFileSection读取到的data2 height = %d,hash = %x ",height,brw.Block.Hash())
-	}
+	//var data2 []byte
+	//if index!=nil {
+	//	b.logger.Infof("xqh GetBlock Index offset = %d,bytelen = %d",index.Offset,index.ByteLen)
+	//	data2,err = b.fileStore.ReadFileSection(index,0)
+	//}
+	//if data2!=nil {
+	//	brw,_ = serialization.DeserializeBlock(data2)
+	//	b.logger.Infof("xqh ReadFileSection读取到的data2 height = %d,hash = %x ",height,brw.Block.Hash())
+	//}
 
 
 	if err != nil {

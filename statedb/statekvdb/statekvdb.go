@@ -151,6 +151,74 @@ func (s *StateKvDB) CommitBlock(blockWithRWSet *serialization.BlockWithSerialize
 		batchDur.Milliseconds(), (writeDur - batchDur).Milliseconds(), time.Since(start).Milliseconds())
 	return nil
 }
+func (s *StateKvDB) ReplaceBlock(blockWithRWSet *serialization.BlockWithSerializedInfo, isCache bool) error {
+	start := time.Now()
+	if isCache {
+		lastHeight ,_ := s.GetLastSavepoint()
+		s.logger.Infof("xqh StateDB ReplaceBlock isCache,lastBlockHeight = %d",lastHeight)
+		batch := types.NewUpdateBatch()
+		// 1. last block height
+		block := blockWithRWSet.Block
+		//xqh 注释掉这三行，不更新lastBlockheight
+		//lastBlockNumBytes := make([]byte, 8)
+		//binary.BigEndian.PutUint64(lastBlockNumBytes, block.Header.BlockHeight)
+		//batch.Put([]byte(stateDBSavepointKey), lastBlockNumBytes)
+
+		txRWSets := blockWithRWSet.TxRWSets
+		for _, txRWSet := range txRWSets {
+			for _, txWrite := range txRWSet.TxWrites {
+				s.operateDbByWriteSet(batch, txWrite)
+			}
+		}
+		//process consensusArgs
+		if len(block.Header.ConsensusArgs) > 0 {
+			err := s.updateConsensusArgs(batch, block)
+			if err != nil {
+				return err
+			}
+		}
+		// update Cache
+		s.cache.AddBlock(block.Header.BlockHeight, batch)
+		lastHeight ,_= s.GetLastSavepoint()
+		s.logger.Infof("xqh StateDB ReplaceBlock isCache,lastBlockHeight after put= %d",lastHeight)
+		s.logger.Debugf("chain[%s]: commit cache block[%d] statedb, batch[%d], time used: %d",
+			block.Header.ChainId, block.Header.BlockHeight, batch.Len(),
+			time.Since(start).Milliseconds())
+		return nil
+	}
+
+	// IsCache == false ,update StateKvDB
+	batch := types.NewUpdateBatch()
+	// 1. last block height
+	block := blockWithRWSet.Block
+	lastBlockNumBytes := make([]byte, 8)
+	binary.BigEndian.PutUint64(lastBlockNumBytes, block.Header.BlockHeight)
+	batch.Put([]byte(stateDBSavepointKey), lastBlockNumBytes)
+
+	txRWSets := blockWithRWSet.TxRWSets
+	for _, txRWSet := range txRWSets {
+		for _, txWrite := range txRWSet.TxWrites {
+			s.operateDbByWriteSet(batch, txWrite)
+		}
+	}
+	//process consensusArgs
+	if len(block.Header.ConsensusArgs) > 0 {
+		err := s.updateConsensusArgs(batch, block)
+		if err != nil {
+			return err
+		}
+	}
+	batchDur := time.Since(start)
+	err := s.writeBatch(block.Header.BlockHeight, batch)
+	if err != nil {
+		return err
+	}
+	writeDur := time.Since(start)
+	s.logger.Debugf("chain[%s]: commit block[%d] kv statedb, time used (batch[%d]:%d, "+
+		"write:%d, total:%d", block.Header.ChainId, block.Header.BlockHeight, batch.Len(),
+		batchDur.Milliseconds(), (writeDur - batchDur).Milliseconds(), time.Since(start).Milliseconds())
+	return nil
+}
 
 // commit k,v to bigCache
 //func (s *StateKvDB) CommitBigCache(contractName string, key []byte, value []byte) {

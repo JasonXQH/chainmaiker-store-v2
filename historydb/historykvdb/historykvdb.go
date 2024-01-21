@@ -168,7 +168,97 @@ func (h *HistoryKvDB) CommitBlock(blockInfo *serialization.BlockWithSerializedIn
 		batchDur.Milliseconds(), (writeDur - batchDur).Milliseconds(), time.Since(start).Milliseconds())
 	return nil
 }
+func (h *HistoryKvDB) ReplaceBlock(blockInfo *serialization.BlockWithSerializedInfo, isCache bool) error {
+	start := time.Now()
+	if isCache {
+		h.logger.Debugf("[historydb]start CommitCache currtime[%d]", utils.CurrentTimeMillisSeconds())
+		batch := types.NewUpdateBatch()
+		// 1. last block height
+		block := blockInfo.Block
+		lastBlockNumBytes := make([]byte, 8)
+		binary.BigEndian.PutUint64(lastBlockNumBytes, block.Header.BlockHeight)
+		batch.Put([]byte(historyDBSavepointKey), lastBlockNumBytes)
+		blockHeight := block.Header.BlockHeight
+		txRWSets := blockInfo.TxRWSets
+		h.logger.Debugf("[historydb]1 CommitCache currtime[%d]", utils.CurrentTimeMillisSeconds())
+		if !h.config.DisableKeyHistory {
+			for index, txRWSet := range txRWSets {
+				txId := txRWSet.TxId
+				for _, write := range txRWSet.TxWrites {
+					key := constructKey(write.ContractName, write.Key, blockHeight, txId, uint64(index))
+					batch.Put(key, []byte{0}) //write key modify history
+				}
+			}
+		}
+		h.logger.Debugf("[historydb]2 CommitCache currtime[%d]", utils.CurrentTimeMillisSeconds())
+		if !h.config.DisableAccountHistory || !h.config.DisableContractHistory {
+			for _, tx := range block.Txs {
+				accountId := tx.GetSenderAccountId()
+				txId := tx.Payload.TxId
+				contractName := tx.Payload.ContractName
+				if !h.config.DisableAccountHistory {
+					batch.Put(constructAcctTxHistKey(accountId, blockHeight, txId), []byte{0})
+				}
+				if !h.config.DisableContractHistory {
+					batch.Put(constructContractTxHistKey(contractName, blockHeight, txId), []byte{0})
+				}
+			}
+		}
+		h.logger.Debugf("[historydb]3 CommitCache currtime[%d]", utils.CurrentTimeMillisSeconds())
+		// update cache
+		h.cache.AddBlock(blockHeight, batch)
+		h.logger.Debugf("[historydb]end CommitCache currtime[%d]", utils.CurrentTimeMillisSeconds())
 
+		h.logger.Debugf("chain[%s]: commit cache block[%d] historydb, batch[%d], time used: %d",
+			block.Header.ChainId, block.Header.BlockHeight, batch.Len(),
+			time.Since(start).Milliseconds())
+		return nil
+	}
+
+	// IsCache == false ,update HistoryKvDB
+	batch := types.NewUpdateBatch()
+	// 1. last block height
+	block := blockInfo.Block
+	lastBlockNumBytes := make([]byte, 8)
+	binary.BigEndian.PutUint64(lastBlockNumBytes, block.Header.BlockHeight)
+	batch.Put([]byte(historyDBSavepointKey), lastBlockNumBytes)
+	blockHeight := block.Header.BlockHeight
+	txRWSets := blockInfo.TxRWSets
+	if !h.config.DisableKeyHistory {
+		for _, txRWSet := range txRWSets {
+			txId := txRWSet.TxId
+			for index, write := range txRWSet.TxWrites {
+				key := constructKey(write.ContractName, write.Key, blockHeight, txId, uint64(index))
+				batch.Put(key, []byte{0}) //write key modify history
+			}
+		}
+	}
+	if !h.config.DisableAccountHistory || !h.config.DisableContractHistory {
+		for _, tx := range block.Txs {
+			accountId := tx.GetSenderAccountId()
+			txId := tx.Payload.TxId
+			contractName := tx.Payload.ContractName
+
+			if !h.config.DisableAccountHistory {
+				batch.Put(constructAcctTxHistKey(accountId, blockHeight, txId), []byte{0})
+			}
+			if !h.config.DisableContractHistory {
+				batch.Put(constructContractTxHistKey(contractName, blockHeight, txId), []byte{0})
+			}
+		}
+	}
+
+	batchDur := time.Since(start)
+	err := h.writeBatch(block.Header.BlockHeight, batch)
+	if err != nil {
+		return err
+	}
+	writeDur := time.Since(start)
+	h.logger.Debugf("chain[%s]: commit block[%d] kv historydb, time used (batch[%d]:%d, "+
+		"write:%d, total:%d)", block.Header.ChainId, block.Header.BlockHeight, batch.Len(),
+		batchDur.Milliseconds(), (writeDur - batchDur).Milliseconds(), time.Since(start).Milliseconds())
+	return nil
+}
 // GetLastSavepoint returns the last block height
 // @Description:
 // @receiver h

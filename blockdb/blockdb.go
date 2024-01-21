@@ -28,7 +28,8 @@ type BlockDB interface {
 	//  @param isCache
 	//  @return error
 	CommitBlock(blockInfo *serialization.BlockWithSerializedInfo, isCache bool) error
-
+	//xqh修改
+	ReplaceBlock(blockInfo *serialization.BlockWithSerializedInfo, isCache bool) error
 	// BlockExists returns true if the block hash exist, or returns false if none exists.
 	//  @Description:
 	//  @param blockHash

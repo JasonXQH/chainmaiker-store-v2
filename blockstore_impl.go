@@ -494,85 +494,91 @@ func (bs *BlockStoreImpl) ReplaceKvDbCacheSqlDb(blockWithSerializedInfo *seriali
 
 	wg := sync.WaitGroup{}
 	wg.Add(8)
-
-	// 1.blockDB
-	go func(bs *BlockStoreImpl, errsChan chan error) {
-		defer wg.Done()
-
+	//
+	// 1.blockDB 最高块改变就发生在这里！！！！
+	//go func(bs *BlockStoreImpl, errsChan chan error) {
+	//	defer wg.Done()
+		lastHeight,_ := bs.GetLastHeight()
+		bs.logger.Infof("xqh 更新blockDB前 获取当前链最高区块：%d",lastHeight)
 		if bs.storeConfig.BlockDbConfig.IsKVDB() {
 			// update blockDB Cache
-			bs.replaceBlock2DB(blockWithSerializedInfo, errsChan, bs.blockDB.CommitBlock, true)
+			bs.replaceBlock2DB(blockWithSerializedInfo, errsChan, bs.blockDB.ReplaceBlock, true)
 		}
 		if bs.storeConfig.BlockDbConfig.IsSqlDB() {
 			// update blockDB SqlDB
 			bs.putBlock2DB(blockWithSerializedInfo, errsChan, bs.blockDB.CommitBlock, false)
 		}
-	}(bs, errsChan)
+		lastHeight,_ 	= bs.GetLastHeight()
+		bs.logger.Infof("xqh 更新blockDB后 获取当前链最高区块：%d",lastHeight)
+	//}(bs, errsChan)
 
 	// 2.stateDB
-	go func(bs *BlockStoreImpl, errsChan chan error) {
-		defer wg.Done()
+	//go func(bs *BlockStoreImpl, errsChan chan error) {
+	//	defer wg.Done()
+	lastHeight,_  = bs.GetLastHeight()
+	bs.logger.Infof("xqh 更新stateDB前 获取当前链最高区块：%d",lastHeight)
 		if bs.storeConfig.StateDbConfig.IsKVDB() {
 			// update stateDB Cache
-			bs.replaceBlock2DB(blockWithSerializedInfo, errsChan, bs.stateDB.CommitBlock, true)
+			bs.replaceBlock2DB(blockWithSerializedInfo, errsChan, bs.stateDB.ReplaceBlock, true)
 		}
 		if bs.storeConfig.StateDbConfig.IsSqlDB() {
 			bs.putBlock2DB(blockWithSerializedInfo, errsChan, bs.stateDB.CommitBlock, false)
 		}
-	}(bs, errsChan)
-
+	lastHeight,_  = bs.GetLastHeight()
+	bs.logger.Infof("xqh 更新stateDB后 获取当前链最高区块：%d",lastHeight)
+	//}(bs, errsChan)
 	// 3.historyDB
 	go func(bs *BlockStoreImpl, errsChan chan error) {
 		defer wg.Done()
 		if !bs.storeConfig.DisableHistoryDB {
 			if bs.storeConfig.HistoryDbConfig.IsKVDB() {
 				// update stateDB Cache
-				bs.replaceBlock2DB(blockWithSerializedInfo, errsChan, bs.historyDB.CommitBlock, true)
+				bs.replaceBlock2DB(blockWithSerializedInfo, errsChan, bs.historyDB.ReplaceBlock, true)
 			}
 			if bs.storeConfig.HistoryDbConfig.IsSqlDB() {
 				bs.putBlock2DB(blockWithSerializedInfo, errsChan, bs.historyDB.CommitBlock, false)
 			}
+
 		}
 	}(bs, errsChan)
-
 	// 4.resultDB
 	go func(bs *BlockStoreImpl, errsChan chan error) {
 		defer wg.Done()
 		if !bs.storeConfig.DisableResultDB {
 			if bs.storeConfig.ResultDbConfig.IsKVDB() {
 				// update stateDB Cache
-				bs.replaceBlock2DB(blockWithSerializedInfo, errsChan, bs.resultDB.CommitBlock, true)
+				bs.replaceBlock2DB(blockWithSerializedInfo, errsChan, bs.resultDB.ReplaceBlock, true)
 			}
 			if bs.storeConfig.ResultDbConfig.IsSqlDB() {
 				bs.putBlock2DB(blockWithSerializedInfo, errsChan, bs.resultDB.CommitBlock, false)
 			}
+
 		}
 	}(bs, errsChan)
-
 	// 5.contractEventDB ,only DB ,contractEventDB has't Cache
 	go func(bs *BlockStoreImpl, errsChan chan error) {
 		defer wg.Done()
 		if !bs.storeConfig.DisableContractEventDB {
 			bs.replaceBlock2DB(blockWithSerializedInfo, errsChan, bs.contractEventDB.CommitBlock, false)
+
 		}
 	}(bs, errsChan)
-
 	// 6.txExistDB ,only DB ,txExistDB has't Cache
 	go func(bs *BlockStoreImpl, errsChan chan error) {
 		defer wg.Done()
 		//if !bs.storeConfig.DisableTxExistDB {
 		bs.replaceBlock2DB(blockWithSerializedInfo, errsChan, bs.txExistDB.CommitBlock, false)
 		//}
-	}(bs, errsChan)
 
+	}(bs, errsChan)
 	// 7.bigFilterDB
 	go func(bs *BlockStoreImpl, errsChan chan error) {
 		defer wg.Done()
 		if bs.storeConfig.EnableBigFilter {
 			bs.replaceBlock2DB(blockWithSerializedInfo, errsChan, bs.bigFilterDB.CommitBlock, true)
+
 		}
 	}(bs, errsChan)
-
 	// 8.rollingWindowCache
 	go func(bs *BlockStoreImpl, errsChan chan error) {
 		defer wg.Done()
@@ -581,7 +587,6 @@ func (bs *BlockStoreImpl) ReplaceKvDbCacheSqlDb(blockWithSerializedInfo *seriali
 		}
 
 	}(bs, errsChan)
-
 	wg.Wait()
 
 	//block := blockWithSerializedInfo.Block
@@ -886,6 +891,7 @@ func (bs *BlockStoreImpl) CommonReplaceBlock(block *commonPb.Block, txRWSets []*
 	marshalDur := time.Since(startTime)
 	errsChan := make(chan error, 6)
 	bs.logger.Infof("xqh commonReplaceBlock: block.Header.BlockHeight [%d]",block.Header.BlockHeight)
+
 	// 1.write wal
 	blockIndex, err := bs.replaceBlockToFile(block.Header.BlockHeight, blockBytes)
 	//blockIndex :=
@@ -924,10 +930,12 @@ func (bs *BlockStoreImpl) CommonReplaceBlock(block *commonPb.Block, txRWSets []*
 	}
 
 	writeKvDBDur := time.Since(startTime)
+
 	//WriteKvDb,有一个写入失败，返回第一个错误
 	if len(errsChan) > 0 {
 		return <-errsChan
 	}
+
 	// 4.删除wal,每100个block删除一次
 	go func() {
 		err = bs.deleteBlockFromLog(block.Header.BlockHeight)
@@ -1138,7 +1146,7 @@ func (bs *BlockStoreImpl) RestoreBlocks(serializedBlocks [][]byte) error {
 }
 
 type commitBlock func(blockInfo *serialization.BlockWithSerializedInfo, isCache bool) error
-
+type replaceBlock func(blockInfo *serialization.BlockWithSerializedInfo, isCache bool) error
 // putBlock2DB add next time
 // @Description:
 // @receiver bs
@@ -1148,7 +1156,6 @@ type commitBlock func(blockInfo *serialization.BlockWithSerializedInfo, isCache 
 // @param isCache
 func (bs *BlockStoreImpl) putBlock2DB(blockWithSerializedInfo *serialization.BlockWithSerializedInfo,
 	errsChan chan error, commit commitBlock, isCache bool) {
-	bs.logger.Infof("xqh putBlock2DB")
 	err := commit(blockWithSerializedInfo, isCache)
 	block := blockWithSerializedInfo.Block
 	if err != nil {
@@ -1158,10 +1165,13 @@ func (bs *BlockStoreImpl) putBlock2DB(blockWithSerializedInfo *serialization.Blo
 	}
 }
 func (bs *BlockStoreImpl) replaceBlock2DB(blockWithSerializedInfo *serialization.BlockWithSerializedInfo,
-	errsChan chan error, commit commitBlock, isCache bool) {
-	bs.logger.Infof("xqh replaceBlock2DB")
-	err := commit(blockWithSerializedInfo, isCache)
+	errsChan chan error, replace replaceBlock, isCache bool) {
+	lastHeight,_ := bs.GetLastHeight()
+	bs.logger.Infof("xqh replaceBlock2DB replace前 获取当前链最高区块：%d",lastHeight)
+	err := replace(blockWithSerializedInfo, isCache)
 	block := blockWithSerializedInfo.Block
+	lastHeight,_ = bs.GetLastHeight()
+	bs.logger.Infof("xqh replaceBlock2DB replace后 获取当前链最高区块：%d",lastHeight)
 	if err != nil {
 		bs.logger.Errorf("chain[%s] failed to write DB, block[%d]",
 			block.Header.ChainId, block.Header.BlockHeight)
@@ -2303,6 +2313,8 @@ func (bs *BlockStoreImpl) writeBlockToFile(blockHeight uint64, bytes []byte) (*s
 //  @return *storePb.StoreInfo
 //  @return error
 func (bs *BlockStoreImpl)  replaceBlockToFile(blockHeight uint64, bytes []byte) (*storePb.StoreInfo, error) {
+
+
 	if bs.storeConfig.DisableBlockFileDb {
 		return nil, bs.walLog.Write(blockHeight+1, bytes)
 	}
@@ -2318,11 +2330,7 @@ func (bs *BlockStoreImpl)  replaceBlockToFile(blockHeight uint64, bytes []byte) 
 		Offset:   offset,
 		ByteLen:  bytesLen,
 	}, nil
-	//return &storePb.StoreInfo{
-	//	FileName: "00000000000000000001",
-	//	Offset:   66415,
-	//	ByteLen:  36179,
-	//}, nil
+
 }
 
 //  getLastFileSavepoint 获得last save point

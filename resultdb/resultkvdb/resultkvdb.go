@@ -97,6 +97,31 @@ func (h *ResultKvDB) CommitBlock(blockInfo *serialization.BlockWithSerializedInf
 		time.Since(start).Milliseconds())
 	return nil
 }
+func (h *ResultKvDB) ReplaceBlock(blockInfo *serialization.BlockWithSerializedInfo, isCache bool) error {
+	start := time.Now()
+	batch, ok := types.NewUpdateBatch().(*types.UpdateBatch)
+	if !ok {
+		return fmt.Errorf("commit block get batch failed")
+	}
+	resulthelper.BuildKVBatch(batch, blockInfo, h.logger)
+
+	block := blockInfo.Block
+	if isCache {
+		h.cache.AddBlock(block.Header.BlockHeight, batch)
+	}
+
+	batchDur := time.Since(start)
+	err := h.writeBatch(block.Header.BlockHeight, batch)
+	if err != nil {
+		return err
+	}
+	writeDur := time.Since(start)
+	h.logger.Debugf("chain[%s]: commit block[%d] kv resultdb, time used (batch[%d]:%d, "+
+		"write:%d, total:%d)", block.Header.ChainId, block.Header.BlockHeight,
+		batch.Len(), batchDur.Milliseconds(), (writeDur - batchDur).Milliseconds(),
+		time.Since(start).Milliseconds())
+	return nil
+}
 
 // ShrinkBlocks archive old blocks rwsets in an atomic operation
 // @Description:

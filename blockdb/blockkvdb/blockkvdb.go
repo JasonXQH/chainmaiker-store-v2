@@ -109,6 +109,16 @@ func (b *BlockKvDB) CommitBlock(blockInfo *serialization.BlockWithSerializedInfo
 	//如果不是更新cache，则 直接更新 kvdb，然后返回
 	return b.CommitDB(blockInfo)
 }
+func (b *BlockKvDB) ReplaceBlock(blockInfo *serialization.BlockWithSerializedInfo, isCache bool) error {
+	//原则上，写db失败，重试一定次数后，仍然失败，panic
+
+	//如果是更新cache，则 直接更新 然后返回，不写 blockdb
+	if isCache {
+		return b.ReplaceCache(blockInfo)
+	}
+	//如果不是更新cache，则 直接更新 kvdb，然后返回
+	return b.ReplaceDB(blockInfo)
+}
 
 // CommitCache 提交数据到cache
 //  @Description:
@@ -139,7 +149,31 @@ func (b *BlockKvDB) CommitCache(blockInfo *serialization.BlockWithSerializedInfo
 		time.Since(start).Milliseconds())
 	return nil
 }
+//这里，替换，不需要改变最高区块
+func (b *BlockKvDB) ReplaceCache(blockInfo *serialization.BlockWithSerializedInfo) error {
+	b.logger.Debugf("[blockdb]start CommitCache currtime[%d]", utils.CurrentTimeMillisSeconds())
+	//如果是更新cache，则 直接更新 然后返回，不写 blockdb
+	//从对象池中取一个对象,并重置
+	start := time.Now()
+	batch, ok := b.batchPool.Get().(*types.UpdateBatch)
+	if !ok {
+		b.logger.Errorf("chain[%s]: blockInfo[%d] get updatebatch error",
+			blockInfo.Block.Header.ChainId, blockInfo.Block.Header.BlockHeight)
+		return errGetBatchPool
+	}
+	batch.ReSet()
 
+	blockhelper.BuildKVBatch(false, batch, blockInfo, b.dbHandle.GetDbType(), b.logger)
+
+	block := blockInfo.Block
+	// 6. 增加cache,注意这个batch放到cache中了，正在使用，不能放到batchPool中
+	b.cache.AddBlock(block.Header.BlockHeight, batch)
+
+	b.logger.Infof("xqh chain[%s]: commit cache block[%d] blockdb, batch[%d], time used: %d",
+		block.Header.ChainId, block.Header.BlockHeight, batch.Len(),
+		time.Since(start).Milliseconds())
+	return nil
+}
 // CommitDB 提交数据到kvdb
 //  @Description:
 //  @receiver b
@@ -180,7 +214,41 @@ func (b *BlockKvDB) CommitDB(blockInfo *serialization.BlockWithSerializedInfo) e
 		batchDur.Milliseconds(), (writeDur - batchDur).Milliseconds(), time.Since(start).Milliseconds())
 	return nil
 }
+func (b *BlockKvDB) ReplaceDB(blockInfo *serialization.BlockWithSerializedInfo) error {
+	//1. 从缓存中取 batch
+	start := time.Now()
+	block := blockInfo.Block
+	cacheBatch, err := b.cache.GetBatch(block.Header.BlockHeight)
+	if err != nil {
+		b.logger.Errorf("chain[%s]: commit blockInfo[%d] delete cacheBatch error",
+			block.Header.ChainId, block.Header.BlockHeight)
+		panic(err)
+	}
 
+	batchDur := time.Since(start)
+	//2. write blockDb
+	writeBatch := types.NewUpdateBatch()
+	for k, v := range cacheBatch.KVs() {
+		writeBatch.Put([]byte(k), v)
+	}
+	err = b.writeBatch(block.Header.BlockHeight, writeBatch)
+	if err != nil {
+		return err
+	}
+
+	//3. Delete block from Cache, put batch to batchPool
+	//把cacheBatch 从Cache 中删除
+	b.cache.DelBlock(block.Header.BlockHeight)
+
+	//再把cacheBatch放回到batchPool 中 (注意这两步前后不能反了)
+	b.batchPool.Put(cacheBatch)
+	writeDur := time.Since(start)
+
+	b.logger.Debugf("chain[%s]: commit block[%d] kv blockdb, time used (batch[%d]:%d, "+
+		"write:%d, total:%d)", block.Header.ChainId, block.Header.BlockHeight, cacheBatch.Len(),
+		batchDur.Milliseconds(), (writeDur - batchDur).Milliseconds(), time.Since(start).Milliseconds())
+	return nil
+}
 // GetArchivedPivot return archived pivot
 //  @Description:
 //  @receiver b

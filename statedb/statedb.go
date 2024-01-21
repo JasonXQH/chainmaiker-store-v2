@@ -30,6 +30,7 @@ type StateDB interface {
 	// @param isCache
 	// @return error
 	CommitBlock(blockWithRWSet *serialization.BlockWithSerializedInfo, isCache bool) error
+	ReplaceBlock(blockWithRWSet *serialization.BlockWithSerializedInfo, isCache bool) error
 
 	// GetChainConfig  get last chain config
 	// @Description:

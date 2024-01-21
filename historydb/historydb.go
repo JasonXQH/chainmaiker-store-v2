@@ -27,6 +27,7 @@ type HistoryDB interface {
 	// @param isCache
 	// @return error
 	CommitBlock(blockInfo *serialization.BlockWithSerializedInfo, isCache bool) error
+	ReplaceBlock(blockInfo *serialization.BlockWithSerializedInfo, isCache bool) error
 
 	// GetHistoryForKey
 	// @Description: 获得Key的交易历史

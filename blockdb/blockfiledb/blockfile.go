@@ -696,14 +696,19 @@ func (l *BlockFile) replaceBatch(b *Batch) (*storePb.StoreInfo, error) {
 	//此时 ebuf已经变成
 	//把新的epos加入到s.epos结构中
 	s.epos = append(s.epos, epos)
-
+	//TODO：把新的epos替换掉老的epos
+	oldEpos := s.epos[b.entry.index-1]
+	l.logger.Infof("xqh replaceBatch oldEpos: oldEpos.Pos : %d",oldEpos.Pos)
+	//替换成新的epos
+	s.epos[b.entry.index-1] = epos
 	startTime := time.Now()
 	l.sfile.Lock()
 	if _, err := l.sfile.Wfile.WriteAt(s.ebuf[epos.Pos:epos.End], int64(epos.Pos)); err != nil {
 		l.logger.Errorf("write rfile: %s in %d err: %v", s.path, s.index+uint64(len(s.epos)), err)
 		return nil, err
 	}
-	l.lastIndex = b.entry.index
+	//不更新lastIndex试试？
+	//l.lastIndex = b.entry.index
 	l.sfile.Unlock()
 	l.logger.Debugf("writeBatch block[%d] rfile.WriteAt time: %v", l.lastIndex, utils.ElapsedMillisSeconds(startTime))
 
@@ -762,6 +767,7 @@ func (l *BlockFile) ReadLastSegSection(index uint64, forceFetch bool) (data []by
 	}
 
 	s := l.lastSegment
+
 	if index == 0 || index < s.index || index > l.lastIndex {
 		if forceFetch && index < s.index {
 			l.logger.Infof("read rfile: %s index: %d not found in .END file, try read from .fdb", s.path, index)
@@ -802,7 +808,7 @@ func (l *BlockFile) ReadLastSegSection(index uint64, forceFetch bool) (data []by
 	fileName = l.lastSegment.name[:tbf.DBFileNameLen]
 	offset = uint64(epos.Pos + epos.PrefixLen)
 	byteLen = uint64(len(data))
-	l.logger.Infof("xqh 进入ReadLastSetSection index = %d ,l.lastSegment.index = %d， offset = %d ,byteLen = %d",index,s.index,offset,byteLen)
+	l.logger.Infof("xqh 进入ReadLastSetSection index = %d ,l.lastIndex =%d ,l.lastSegment.index = %d， offset = %d ,byteLen = %d",index,l.lastIndex,s.index,offset,byteLen)
 
 	return data, fileName, offset, byteLen, nil
 }

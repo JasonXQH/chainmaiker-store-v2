@@ -19,6 +19,7 @@ type ResultDB interface {
 
 	// CommitBlock commits the block rwsets in an atomic operation
 	CommitBlock(blockInfo *serialization.BlockWithSerializedInfo, isCache bool) error
+	ReplaceBlock(blockInfo *serialization.BlockWithSerializedInfo, isCache bool) error
 
 	// ShrinkBlocks archive old blocks rwsets in an atomic operation
 	ShrinkBlocks(txIdsMap map[uint64][]string, height uint64, bfdbPath string) error

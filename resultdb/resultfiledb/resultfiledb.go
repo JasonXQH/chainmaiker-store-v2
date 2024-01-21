@@ -131,6 +131,43 @@ func (h *ResultFileDB) CommitBlock(blockInfo *serialization.BlockWithSerializedI
 	}
 	return nil
 }
+func (h *ResultFileDB) ReplaceBlock(blockInfo *serialization.BlockWithSerializedInfo, isCache bool) error {
+	start := time.Now()
+
+	batch, ok := h.batchPools[0].Get().(*types.UpdateBatch)
+	if !ok {
+		return fmt.Errorf("archive get shrink update batch failed")
+	}
+	batch.ReSet()
+	defer h.batchPools[0].Put(batch)
+
+	// 1. last block height
+	block := blockInfo.Block
+	lastBlockNumBytes := make([]byte, 8)
+	binary.BigEndian.PutUint64(lastBlockNumBytes, block.Header.BlockHeight)
+	batch.Put([]byte(resulthelper.ResultDBSavepointKey), lastBlockNumBytes)
+
+	for index, txRWSet := range blockInfo.TxRWSets {
+		rwSetIndexKey := resulthelper.ConstructTxRWSetIndexKey(txRWSet.TxId)
+		rwIndex := blockInfo.RWSetsIndex[index]
+		rwIndexInfo := su.ConstructDBIndexInfo(blockInfo.Index, rwIndex.Offset, rwIndex.ByteLen)
+		batch.Put(rwSetIndexKey, rwIndexInfo)
+	}
+
+	if isCache {
+		// update Cache
+		h.cache.AddBlock(block.Header.BlockHeight, batch)
+		h.logger.Infof("chain[%s]: commit result file cache block[%d], batch[%d], time used: %d",
+			block.Header.ChainId, block.Header.BlockHeight, batch.Len(),
+			time.Since(start).Milliseconds())
+	}
+
+	err := h.writeBatch(block.Header.BlockHeight, batch)
+	if err != nil {
+		return err
+	}
+	return nil
+}
 
 // ShrinkBlocks archive old blocks rwSets in an atomic operation
 // @Description:
